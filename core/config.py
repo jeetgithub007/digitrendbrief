@@ -19,6 +19,11 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8765"))
 IS_VERCEL = bool(os.getenv("VERCEL"))
 
+# ---- Supabase & Admin Credentials ----
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://vehxbphzorgaomzrbizc.supabase.co")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZlaHhicGh6b3JnYW9tenJiaXpjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEwMDc4NDEsImV4cCI6MjEwNjU4Mzg0MX0.mKeoUK24H__I0VVSsMDIQpq6WEYkiElRJdwzVJFxsqA")
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "j.parganiha@gmail.com")
+
 # ---- API Keys ----
 MEDIASTACK_KEY = os.getenv("MEDIASTACK_KEY", "")
 GNEWS_KEY = os.getenv("GNEWS_KEY", "")

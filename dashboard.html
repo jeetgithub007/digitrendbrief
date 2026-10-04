@@ -1630,10 +1630,14 @@ async function generateAndPublishArticle(rank) {
   if (!t) return;
   showModal(`⚡ Synthesizing Article — ${t.title}`, '<p style="color:var(--text2)">Synthesizing human-grade, SEO/AEO-optimized article...</p>');
   try {
+    const userEmail = (window.currentUser && window.currentUser.email) ? window.currentUser.email : 'j.parganiha@gmail.com';
     const r = await fetch(`/api/articles/generate-and-publish`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rank: rank, trend: t })
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Admin-Email': userEmail
+      },
+      body: JSON.stringify({ rank: rank, trend: t, admin_email: userEmail })
     });
     const d = await r.json();
     const art = d.article;

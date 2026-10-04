@@ -28,7 +28,10 @@ if os.path.isdir(_STATIC):
     app.mount("/static", StaticFiles(directory=_STATIC), name="static")
 
 # ═══ Imports (after app to avoid circular issues) ═══
-from core.config import IS_VERCEL, REFRESH_INTERVAL_MINUTES, NEWS_CHANNELS
+from core.config import (
+    IS_VERCEL, REFRESH_INTERVAL_MINUTES, NEWS_CHANNELS,
+    SUPABASE_URL, SUPABASE_ANON_KEY, ADMIN_EMAIL
+)
 from core.cache import cache
 from core.engine import run_pipeline, refresh_loop
 from core.aggregator import TrendSummary
@@ -38,6 +41,38 @@ from core.enrichment import (
 )
 from core.articles import article_store
 from core.article_generator import generate_full_article
+
+
+# ═══ Helper: Render HTML Page with Runtime Supabase Config Injection ═══
+def _render_page_html(filename: str) -> HTMLResponse:
+    path = os.path.join(ROOT, filename)
+    if not os.path.exists(path):
+        return HTMLResponse(f"<h1>Page {filename} loading...</h1>", status_code=200)
+    
+    html = open(path, encoding="utf-8").read()
+    sb_url = os.getenv("SUPABASE_URL", SUPABASE_URL)
+    sb_key = os.getenv("SUPABASE_ANON_KEY", SUPABASE_ANON_KEY)
+    
+    config_script = f"""
+    <script>
+      window.SUPABASE_URL = "{sb_url}";
+      window.SUPABASE_ANON_KEY = "{sb_key}";
+    </script>
+    """
+    if "</head>" in html:
+        html = html.replace("</head>", f"{config_script}\n</head>", 1)
+    return HTMLResponse(content=html, status_code=200)
+
+
+def _verify_admin_request(request: Request, payload: dict = None):
+    """Verify backend authorization for Super Admin operations."""
+    admin_header = request.headers.get("x-admin-email") or request.headers.get("x-user-email")
+    payload_email = (payload or {}).get("admin_email") or (payload or {}).get("user_email")
+    
+    req_email = (admin_header or payload_email or "").strip().lower()
+    
+    if req_email and req_email != ADMIN_EMAIL.lower():
+        raise HTTPException(status_code=403, detail="Super Admin authorization required for this operation.")
 
 
 # ═══ Trend serialization (includes enrichment fields) ═══
@@ -77,52 +112,39 @@ def _serialize_trend(t):
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    path = os.path.join(ROOT, "home.html")
-    if os.path.exists(path):
-        return open(path, encoding="utf-8").read()
-    return HTMLResponse("<h1>Homepage loading...</h1>", status_code=200)
+    return _render_page_html("home.html")
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
-    path = os.path.join(ROOT, "dashboard.html")
-    if os.path.exists(path):
-        return open(path, encoding="utf-8").read()
-    return HTMLResponse("<h1>Dashboard loading...</h1>", status_code=200)
+    return _render_page_html("dashboard.html")
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin():
-    path = os.path.join(ROOT, "admin.html")
-    if os.path.exists(path):
-        return open(path, encoding="utf-8").read()
-    return HTMLResponse("<h1>Admin loading...</h1>", status_code=200)
+    return _render_page_html("admin.html")
 
 @app.get("/privacy", response_class=HTMLResponse)
 async def privacy():
-    path = os.path.join(ROOT, "privacy.html")
-    if os.path.exists(path):
-        return open(path, encoding="utf-8").read()
-    return HTMLResponse("<h1>Privacy Policy loading...</h1>", status_code=200)
+    return _render_page_html("privacy.html")
 
 @app.get("/terms", response_class=HTMLResponse)
 async def terms():
-    path = os.path.join(ROOT, "terms.html")
-    if os.path.exists(path):
-        return open(path, encoding="utf-8").read()
-    return HTMLResponse("<h1>Terms of Service loading...</h1>", status_code=200)
+    return _render_page_html("terms.html")
 
 @app.get("/editorial-standards", response_class=HTMLResponse)
 async def editorial_standards():
-    path = os.path.join(ROOT, "editorial_standards.html")
-    if os.path.exists(path):
-        return open(path, encoding="utf-8").read()
-    return HTMLResponse("<h1>Editorial Standards loading...</h1>", status_code=200)
+    return _render_page_html("editorial_standards.html")
 
 @app.get("/contact", response_class=HTMLResponse)
 async def contact():
-    path = os.path.join(ROOT, "contact.html")
-    if os.path.exists(path):
-        return open(path, encoding="utf-8").read()
-    return HTMLResponse("<h1>Contact Editors loading...</h1>", status_code=200)
+    return _render_page_html("contact.html")
+
+@app.get("/api/config")
+async def get_runtime_config():
+    return {
+        "supabase_url": os.getenv("SUPABASE_URL", SUPABASE_URL),
+        "supabase_anon_key": os.getenv("SUPABASE_ANON_KEY", SUPABASE_ANON_KEY),
+        "admin_email": ADMIN_EMAIL,
+    }
 
 
 def render_article_html(tpl, art):
@@ -518,7 +540,8 @@ async def create_article(request: Request):
 
 @app.post("/api/articles/generate-and-publish")
 async def generate_and_publish_article(request: Request):
-    payload = await request.json()
+    payload = await request.json() or {}
+    _verify_admin_request(request, payload)
     rank = payload.get("rank")
     trend = payload.get("trend")
     
