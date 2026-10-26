@@ -66,10 +66,6 @@
 </script>
 <script type="application/ld+json" id="trendsJsonLd"></script>
 
-<!-- Supabase Auth SDK & Client Engine -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="/static/js/supabase_auth.js?v=2.3"></script>
-
 <style>
   :root {
     --bg: #0f0f12;
@@ -795,8 +791,8 @@
       <span style="font-weight:800; font-size:1.4rem; color:#fff;">DIGITAL<span style="background:linear-gradient(135deg, #38bdf8, #818cf8, #c084fc); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">BRIEF</span></span> <span style="font-size:0.8rem; background:rgba(99,102,241,0.15); border:1px solid rgba(99,102,241,0.3); color:#818cf8; padding:2px 8px; border-radius:6px; text-transform:uppercase; font-weight:700;">Pipeline</span></a></div>
     <div style="display:flex; gap:10px; align-items:center; margin-left:auto;">
       <a href="/" class="btn btn-sm" style="text-decoration:none;">🌐 Home</a>
-      <div id="userAuthContainer"></div>
-      <button class="btn btn-sm" onclick="openSubscription()" aria-label="Subscribe to news">🔔 Subscribe</button>
+      <a href="/admin" class="btn btn-sm" style="text-decoration:none; background:rgba(168,85,247,0.18); border:1px solid #a855f7; color:#c084fc;">⚙️ Editorial CMS</a>
+      <button class="btn btn-sm btn-primary" onclick="refreshData()" aria-label="Refresh intelligence pipeline">🔄 Refresh Feed</button>
     </div>
     <div class="header-stats" id="headerStats">
       <div class="stat"><div class="stat-value">-</div><div class="stat-label">Total Trends</div></div>
@@ -1011,13 +1007,11 @@ document.addEventListener('click', (e) => {
 function exportData(format) {
   const wrap = document.getElementById('exportMenuWrap');
   if (wrap) wrap.classList.remove('open');
-  if (!checkSubscriberAccess('Dataset Export (CSV/JSON)')) return;
   const url = `/api/trends/export?format=${format}&category=${encodeURIComponent(currentCategory)}&min_score=${currentMinScore}`;
   window.location.href = url;
 }
 
 function toggleAnalytics() {
-  if (!checkSubscriberAccess('Real-Time Analytics Panel')) return;
   const panel = document.getElementById('analyticsPanel');
   if (!panel) return;
   const isHidden = panel.style.display === 'none' || !panel.style.display;
@@ -1504,10 +1498,6 @@ function renderIdeas() {
 
 // ── Filters ──
 function filterSource(source) {
-  if (source !== 'all' && !checkSubscriberAccess('Multi-Source Filter')) {
-    document.getElementById('sourceSelect').value = 'all';
-    return;
-  }
   currentSource = source;
   const sel = document.getElementById('sourceSelect');
   if (sel && sel.value !== source) sel.value = source;
@@ -1536,7 +1526,6 @@ function sortBy(sort) {
 }
 
 function filterByCategory(cat) {
-  if (cat !== 'all' && !checkSubscriberAccess('Category Horizon Deep-Dives')) return;
   currentCategory = cat;
   document.querySelectorAll('.horizon-chip[data-cat]').forEach(b => {
     b.classList.toggle('active', b.dataset.cat === cat);
@@ -1594,11 +1583,6 @@ function viewDetails(rank) {
 }
 
 async function generateArticle(rank) {
-  if (!window.isAdminUser || !window.isAdminUser()) {
-    if (window.showAdminOnlyModal) showAdminOnlyModal('Article Brief Generator');
-    else alert("🔒 Super Admin Access Required: Article generation is restricted exclusively to j.parganiha@gmail.com.");
-    return;
-  }
   const t = _findTrend(rank);
   if (!t) return;
   showModal(`📝 Article — ${t.title}`, '<p style="color:var(--text2)">Generating article brief…</p>');
@@ -1621,28 +1605,21 @@ async function generateArticle(rank) {
 }
 
 async function generateAndPublishArticle(rank) {
-  if (!window.isAdminUser || !window.isAdminUser()) {
-    if (window.showAdminOnlyModal) showAdminOnlyModal('AI Article Publishing Engine');
-    else alert("🔒 Super Admin Access Required: Article generation is restricted exclusively to j.parganiha@gmail.com.");
-    return;
-  }
   const t = _findTrend(rank);
   if (!t) return;
   showModal(`⚡ Synthesizing Article — ${t.title}`, '<p style="color:var(--text2)">Synthesizing human-grade, SEO/AEO-optimized article...</p>');
   try {
-    const userEmail = (window.currentUser && window.currentUser.email) ? window.currentUser.email : 'j.parganiha@gmail.com';
     const r = await fetch(`/api/articles/generate-and-publish`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        'X-Admin-Email': userEmail
+        'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ rank: rank, trend: t, admin_email: userEmail })
+      body: JSON.stringify({ rank: rank, trend: t })
     });
     const d = await r.json();
     const art = d.article;
     if (!art) {
-      document.getElementById('modalBody').innerHTML = '<p style="color:#ef4444;">Failed to generate article.</p>';
+      document.getElementById('modalBody').innerHTML = `<p style="color:#ef4444;">${escapeHtml(d.detail || 'Failed to generate article.')}</p>`;
       return;
     }
 
@@ -1654,8 +1631,8 @@ async function generateAndPublishArticle(rank) {
       <p style="color:var(--text2); margin-bottom:14px; font-size:0.9rem;">${escapeHtml(art.excerpt || '')}</p>
       
       <div style="display:flex; gap:12px; margin-top:20px; flex-wrap:wrap;">
-        <a href="/article/${art.slug}" target="_blank" class="action-btn" style="background:#6366f1; color:#fff; padding:8px 16px; text-decoration:none; font-weight:600;">🌐 View Published Article &rarr;</a>
-        ${window.isAdminUser ? (window.isAdminUser() ? '<a href="/admin" target="_blank" class="action-btn" style="background:#1e293b; color:#cbd5e1; padding:8px 16px; text-decoration:none; font-weight:600;">⚙️ Open in Admin CMS</a>' : '') : ''}
+        <a href="/article/${art.slug}" target="_blank" class="action-btn" style="background:#6366f1; color:#fff; padding:8px 16px; text-decoration:none; font-weight:600; border-radius:8px;">🌐 View Published Article &rarr;</a>
+        <a href="/admin" target="_blank" class="action-btn" style="background:#1e293b; color:#cbd5e1; padding:8px 16px; text-decoration:none; font-weight:600; border-radius:8px;">⚙️ Open in Editorial CMS</a>
       </div>
     `;
   } catch (e) {
@@ -1664,7 +1641,6 @@ async function generateAndPublishArticle(rank) {
 }
 
 async function generateSocial(rank) {
-  if (!checkSubscriberAccess('Social Post Generator')) return;
   const t = _findTrend(rank);
   if (!t) return;
   showModal(`📣 Social Post — ${t.title}`, '<p style="color:var(--text2)">Generating social post…</p>');
@@ -1684,7 +1660,6 @@ async function generateSocial(rank) {
 }
 
 async function openContentSuite(rank) {
-  if (!checkSubscriberAccess('AI Multi-Platform Content Suite')) return;
   const t = _findTrend(rank);
   if (!t) return;
   showModal(`🚀 AI Multi-Platform Content Suite — ${t.title}`, '<p style="color:var(--text2)">Generating AI content suite for all platforms…</p>');
@@ -1746,7 +1721,6 @@ function copyTextToClipboard(btn) {
 }
 
 async function saveTrend(rank) {
-  if (!checkSubscriberAccess('Story Bookmarking')) return;
   const t = _findTrend(rank);
   if (!t) return;
   try {
@@ -1759,7 +1733,6 @@ async function saveTrend(rank) {
 }
 
 async function dismissTrend(rank) {
-  if (!checkSubscriberAccess('Trend Dismissal')) return;
   const t = _findTrend(rank);
   if (!t) return;
   try {
@@ -1804,7 +1777,6 @@ async function refreshData() {
 }
 
 async function forceRefresh() {
-  if (!checkSubscriberAccess('Live Crawler Pipeline Refresh')) return;
   await refreshData();
 }
 

@@ -87,7 +87,19 @@ class ArticleStore:
                 json.dump(self._articles, f, indent=2, ensure_ascii=False)
             temp_path.replace(self.filepath)
         except Exception as e:
-            logger.error(f"Failed to save articles file: {e}")
+            logger.warning(f"Could not save to primary path {self.filepath}: {e}")
+            try:
+                import tempfile
+                tmp_dir = Path(tempfile.gettempdir())
+                tmp_file = tmp_dir / "published_articles.json"
+                tmp_temp = tmp_dir / "published_articles.tmp"
+                with open(tmp_temp, "w", encoding="utf-8") as f:
+                    json.dump(self._articles, f, indent=2, ensure_ascii=False)
+                tmp_temp.replace(tmp_file)
+                self.filepath = tmp_file
+                logger.info(f"Saved articles to fallback path: {tmp_file}")
+            except Exception as e2:
+                logger.error(f"Fallback save also failed: {e2}")
 
     def list_articles(self, status=None, category=None, search=None, limit=50, offset=0):
         with self._lock:

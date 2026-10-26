@@ -1,10 +1,11 @@
 """
 DigitalBrief Trend Pipeline — Unified Entry Point
 ==================================================
-Works locally (python api/index.py) AND on Vercel.
-All routes, pages, and API endpoints in one file.
+Standalone, clean architecture with zero external database dependencies.
+Works locally (python api/index.py) AND on Vercel serverless.
 """
 import sys, os, asyncio, logging
+from contextlib import asynccontextmanager
 
 # Path setup — works in both local and Vercel environments
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -18,19 +19,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-# ═══ APP (at module level — required by Vercel) ═══
-app = FastAPI(title="Trend Pipeline", version="2.0", docs_url="/docs")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
-# Static files
-_STATIC = os.path.join(ROOT, "static")
-if os.path.isdir(_STATIC):
-    app.mount("/static", StaticFiles(directory=_STATIC), name="static")
-
-# ═══ Imports (after app to avoid circular issues) ═══
+# ═══ Imports from core ═══
 from core.config import (
-    IS_VERCEL, REFRESH_INTERVAL_MINUTES, NEWS_CHANNELS,
-    SUPABASE_URL, SUPABASE_ANON_KEY, ADMIN_EMAIL
+    HOST, PORT, IS_VERCEL, REFRESH_INTERVAL_MINUTES, NEWS_CHANNELS, APP_NAME
 )
 from core.cache import cache
 from core.engine import run_pipeline, refresh_loop
@@ -43,41 +34,44 @@ from core.articles import article_store
 from core.article_generator import generate_full_article
 
 
-# ═══ Helper: Render HTML Page with Runtime Supabase Config Injection ═══
+# ═══ Lifespan Context Manager (Modern FastAPI) ═══
+async def _delayed_startup():
+    """Delay pipeline start so server can serve requests immediately."""
+    await asyncio.sleep(4)
+    logger.info("Local mode — background pipeline starting")
+    asyncio.create_task(refresh_loop())
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if not IS_VERCEL:
+        asyncio.create_task(_delayed_startup())
+        logger.info("Server ready — background pipeline will start in 4s")
+    else:
+        logger.info("Vercel mode — serverless on-demand pipeline active")
+    yield
+
+# ═══ App Initialization ═══
+app = FastAPI(title="Trend Pipeline", version="2.0", docs_url="/docs", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# Static files
+_STATIC = os.path.join(ROOT, "static")
+if os.path.isdir(_STATIC):
+    app.mount("/static", StaticFiles(directory=_STATIC), name="static")
+
+
+# ═══ Helper: Render HTML Page directly ═══
 def _render_page_html(filename: str) -> HTMLResponse:
     path = os.path.join(ROOT, filename)
     if not os.path.exists(path):
-        return HTMLResponse(f"<h1>Page {filename} loading...</h1>", status_code=200)
-    
-    html = open(path, encoding="utf-8").read()
-    sb_url = os.getenv("SUPABASE_URL", SUPABASE_URL)
-    sb_key = os.getenv("SUPABASE_ANON_KEY", SUPABASE_ANON_KEY)
-    
-    config_script = f"""
-    <script>
-      window.SUPABASE_URL = "{sb_url}";
-      window.SUPABASE_ANON_KEY = "{sb_key}";
-    </script>
-    """
-    if "</head>" in html:
-        html = html.replace("</head>", f"{config_script}\n</head>", 1)
-    return HTMLResponse(content=html, status_code=200)
+        return HTMLResponse(f"<h1>Page {filename} not found</h1>", status_code=404)
+    with open(path, encoding="utf-8") as f:
+        return HTMLResponse(content=f.read(), status_code=200)
 
 
-def _verify_admin_request(request: Request, payload: dict = None):
-    """Verify backend authorization for Super Admin operations."""
-    admin_header = request.headers.get("x-admin-email") or request.headers.get("x-user-email")
-    payload_email = (payload or {}).get("admin_email") or (payload or {}).get("user_email")
-    
-    req_email = (admin_header or payload_email or "").strip().lower()
-    
-    if req_email and req_email != ADMIN_EMAIL.lower():
-        raise HTTPException(status_code=403, detail="Super Admin authorization required for this operation.")
-
-
-# ═══ Trend serialization (includes enrichment fields) ═══
+# ═══ Trend serialization ═══
 def _serialize_trend(t):
-    """Serialize a trend with all enrichment fields (optional/graceful)."""
+    """Serialize a trend with all enrichment fields."""
     return {
         "rank": t.get("rank"),
         "title": t.get("title", ""),
@@ -106,8 +100,20 @@ def _serialize_trend(t):
         "dismissed": t.get("title", "") in cache.dismissed_titles(),
     }
 
+
+def _find_trend(rank):
+    data, _, _ = cache.get()
+    if not data:
+        return None
+    rank_str = str(rank).strip()
+    for t in data:
+        if str(t.get("rank", "")).strip() == rank_str:
+            return t
+    return None
+
+
 # ═══════════════════════════════════════
-# PAGES
+# WEB PAGES
 # ═══════════════════════════════════════
 
 @app.get("/", response_class=HTMLResponse)
@@ -141,16 +147,15 @@ async def contact():
 @app.get("/api/config")
 async def get_runtime_config():
     return {
-        "supabase_url": os.getenv("SUPABASE_URL", SUPABASE_URL),
-        "supabase_anon_key": os.getenv("SUPABASE_ANON_KEY", SUPABASE_ANON_KEY),
-        "admin_email": ADMIN_EMAIL,
+        "app_name": APP_NAME,
+        "version": "2.0",
+        "auth_required": False
     }
 
 
 def render_article_html(tpl, art):
     import html as html_lib
     import json as json_lib
-    import re as re_lib
 
     faq_items = art.get("faq") or []
     faq_html = ""
@@ -249,6 +254,7 @@ async def article_view(slug: str):
     rendered = render_article_html(tpl_str, art)
     return HTMLResponse(rendered)
 
+
 @app.get("/robots.txt")
 async def robots():
     base = os.getenv("SITE_URL", "https://digitalbrief.in").rstrip("/")
@@ -260,7 +266,12 @@ async def robots():
 @app.get("/sitemap.xml")
 async def sitemap():
     base = os.getenv("SITE_URL", "https://digitalbrief.in").rstrip("/")
-    urls = [f"{base}/"]
+    urls = [f"{base}/", f"{base}/dashboard"]
+    articles, _ = article_store.list_articles(limit=200)
+    for a in articles:
+        if a.get("slug"):
+            urls.append(f"{base}/article/{a['slug']}")
+
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
@@ -272,11 +283,13 @@ async def sitemap():
     )
     return Response(content=xml, media_type="application/xml")
 
+
 # ═══════════════════════════════════════
-# API
+# TREND INTELLIGENCE API
 # ═══════════════════════════════════════
 
 @app.get("/api/trends/status")
+@app.get("/api/status")
 async def api_status():
     return cache.status()
 
@@ -293,8 +306,15 @@ async def api_trends(limit: int = Query(50, ge=1, le=100), min_score: int = Quer
                 and (not source or source in t.get("sources", [t["source"]]))]
     filtered = filtered[:limit]
     clean = [_serialize_trend(t) for t in filtered]
-    return {"data": clean, "total": len(clean), "pipeline": {"last_refresh": cache.status()["last_updated"],
-            "refresh_count": cache.status()["refresh_count"], "age_seconds": cache.status().get("age_seconds")}}
+    return {
+        "data": clean,
+        "total": len(clean),
+        "pipeline": {
+            "last_refresh": cache.status()["last_updated"],
+            "refresh_count": cache.status()["refresh_count"],
+            "age_seconds": cache.status().get("age_seconds")
+        }
+    }
 
 
 @app.get("/api/trends/enriched")
@@ -325,8 +345,12 @@ async def api_trends_enriched(
     items.sort(key=key, reverse=True)
 
     clean = [_serialize_trend(t) for t in items[:limit]]
-    return {"data": clean, "total": len(clean),
-            "categories": sorted({normalize_category(t.get("category")) for t in data})}
+    return {
+        "data": clean,
+        "total": len(clean),
+        "categories": sorted({normalize_category(t.get("category")) for t in data})
+    }
+
 
 @app.get("/api/trends/top")
 async def api_top(n: int = Query(10, ge=1, le=30)):
@@ -335,6 +359,7 @@ async def api_top(n: int = Query(10, ge=1, le=30)):
         return {"data": [], "status": "no_data"}
     return {"data": TrendSummary.top_rising(data, n), "total_available": len(data)}
 
+
 @app.get("/api/trends/ideas")
 async def api_ideas(min_score: int = Query(50, ge=0, le=100)):
     data, _, _ = cache.get()
@@ -342,11 +367,13 @@ async def api_ideas(min_score: int = Query(50, ge=0, le=100)):
         return {"data": [], "status": "no_data"}
     return {"data": TrendSummary.content_ideas(data, min_score)}
 
+
 @app.get("/api/trends/refresh")
+@app.post("/api/refresh")
 async def api_refresh():
     try:
-        await run_pipeline()
-        return {"status": "ok"}
+        trends = await run_pipeline()
+        return {"status": "ok", "trends_count": len(trends or [])}
     except Exception as e:
         import re as _re
         safe = _re.sub(r"https?://\S+", "<url>", str(e))[:200]
@@ -354,19 +381,8 @@ async def api_refresh():
 
 
 # ═══════════════════════════════════════
-# Trend actions (enrichment + content)
+# CONTENT GENERATORS
 # ═══════════════════════════════════════
-
-def _find_trend(rank):
-    data, _, _ = cache.get()
-    if not data:
-        return None
-    rank_str = str(rank).strip()
-    for t in data:
-        if str(t.get("rank", "")).strip() == rank_str:
-            return t
-    return None
-
 
 @app.get("/api/trends/{rank}/article")
 async def api_article(rank: int):
@@ -455,45 +471,6 @@ async def api_dismiss(rank: int):
     return cache.dismiss(t["title"])
 
 
-@app.get("/api/channels/live")
-async def api_channels_live():
-    """Live-state probe results for the Video News channels (cached, single-flight)."""
-    from core.channels import get_channel_states
-    import time
-    try:
-        state = await get_channel_states(NEWS_CHANNELS)
-        return {
-            "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S+05:30", time.localtime(state["checked_at"])),
-            "error": state.get("error"),
-            "data": state["channels"],
-            "total": len(state["channels"]),
-        }
-    except Exception as e:  # noqa: BLE001 - never take the section down
-        return {"checked_at": None, "error": str(e)[:200], "data": [], "total": 0}
-
-
-@app.get("/api/channels")
-async def api_channels():
-    """News-channel registry from the source config (URLs sanitized to http/https)."""
-    from urllib.parse import urlparse
-    import re
-    out = []
-    for c in NEWS_CHANNELS:
-        if not c.get("active", True):
-            continue
-        entry = dict(c)
-        # Sanitize external URLs: only http/https allowed
-        u = entry.get("website")
-        if u and urlparse(u).scheme not in ("http", "https"):
-            entry["website"] = ""
-        # YouTube channel ids must look like channel ids (UC + 22 chars)
-        y = entry.get("youtube")
-        if y and not re.fullmatch(r"UC[\w-]{22}", y):
-            entry["youtube"] = ""
-        out.append(entry)
-    return {"data": out, "total": len(out)}
-
-
 @app.get("/api/trends/saved")
 async def api_saved_list():
     titles = cache.saved_titles()
@@ -505,8 +482,45 @@ async def api_saved_list():
     return {"data": items, "total": len(items)}
 
 
+@app.get("/api/channels/live")
+async def api_channels_live():
+    """Live-state probe results for the Video News channels."""
+    from core.channels import get_channel_states
+    import time
+    try:
+        state = await get_channel_states(NEWS_CHANNELS)
+        return {
+            "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S+05:30", time.localtime(state["checked_at"])),
+            "error": state.get("error"),
+            "data": state["channels"],
+            "total": len(state["channels"]),
+        }
+    except Exception as e:
+        return {"checked_at": None, "error": str(e)[:200], "data": [], "total": 0}
+
+
+@app.get("/api/channels")
+async def api_channels():
+    """News-channel registry from the source config."""
+    from urllib.parse import urlparse
+    import re
+    out = []
+    for c in NEWS_CHANNELS:
+        if not c.get("active", True):
+            continue
+        entry = dict(c)
+        u = entry.get("website")
+        if u and urlparse(u).scheme not in ("http", "https"):
+            entry["website"] = ""
+        y = entry.get("youtube")
+        if y and not re.fullmatch(r"UC[\w-]{22}", y):
+            entry["youtube"] = ""
+        out.append(entry)
+    return {"data": out, "total": len(out)}
+
+
 # ═══════════════════════════════════════
-# ARTICLE PUBLISHING & CMS API
+# ARTICLE PUBLISHING & CMS API (100% OPEN — ZERO RESTRICTIONS)
 # ═══════════════════════════════════════
 
 @app.get("/api/articles")
@@ -531,17 +545,18 @@ async def get_article_single(id_or_slug: str):
 
 @app.post("/api/articles")
 async def create_article(request: Request):
+    """Create a new article without any admin restriction."""
     payload = await request.json()
     if not payload.get("title"):
         raise HTTPException(status_code=400, detail="Title is required")
     created = article_store.create(payload)
-    return {"status": "ok", "article": created}
+    return {"status": "ok", "article": created, "message": "Article published successfully!"}
 
 
 @app.post("/api/articles/generate-and-publish")
 async def generate_and_publish_article(request: Request):
+    """Synthesizes human-grade, SEO/AEO-optimized article and publishes it immediately."""
     payload = await request.json() or {}
-    _verify_admin_request(request, payload)
     rank = payload.get("rank")
     trend = payload.get("trend")
     
@@ -554,7 +569,7 @@ async def generate_and_publish_article(request: Request):
     news_id = trend.get("url") or trend.get("title")
     existing = article_store.get_by_news_id(news_id)
     if existing:
-        return {"status": "existing", "article": existing, "message": "Article already generated for this story!"}
+        return {"status": "existing", "article": existing, "message": "Article already exists for this trend!"}
 
     article_data = generate_full_article(trend)
     article_data["original_news_id"] = news_id
@@ -564,50 +579,31 @@ async def generate_and_publish_article(request: Request):
 
 @app.put("/api/articles/{article_id}")
 async def update_article(article_id: str, request: Request):
+    """Update article without any restrictions."""
     payload = await request.json()
     updated = article_store.update(article_id, payload)
     if not updated:
         raise HTTPException(status_code=404, detail="Article not found")
-    return {"status": "ok", "article": updated}
+    return {"status": "ok", "article": updated, "message": "Article updated successfully!"}
 
 
 @app.delete("/api/articles/{article_id}")
 async def delete_article(article_id: str):
+    """Delete article without any restrictions."""
     success = article_store.delete(article_id)
     if not success:
         raise HTTPException(status_code=404, detail="Article not found")
-    return {"status": "ok", "message": "Article deleted"}
+    return {"status": "ok", "message": "Article deleted successfully"}
 
 
 # ═══════════════════════════════════════
-# STARTUP — background refresh (local only)
-# ═══════════════════════════════════════
-
-async def _delayed_startup():
-    """Delay pipeline start so server can serve requests immediately."""
-    await asyncio.sleep(5)
-    logger.info("Local mode — background pipeline starting")
-    asyncio.create_task(refresh_loop())
-
-
-@app.on_event("startup")
-async def on_startup():
-    if not IS_VERCEL:
-        asyncio.create_task(_delayed_startup())
-        logger.info("Server ready — pipeline will start in 5s")
-    else:
-        logger.info("Vercel mode — on-demand only")
-
-
-# ═══════════════════════════════════════
-# CLI — run locally
+# CLI ENTRY POINT
 # ═══════════════════════════════════════
 if __name__ == "__main__":
     import uvicorn
-    from core.config import HOST, PORT
-    print(f"\n  Trend Pipeline v2.0")
-    print(f"  http://{HOST}:{PORT}            Home (Dashboard)")
-    print(f"  http://{HOST}:{PORT}/dashboard  Dashboard")
-    print(f"  http://{HOST}:{PORT}/docs       API Docs\n")
-    uvicorn.run(app, host=HOST, port=PORT, reload=False, log_level="info")
-
+    print(f"\n  [OK] {APP_NAME} v2.0")
+    print(f"  * http://localhost:{PORT}            Home Page")
+    print(f"  * http://localhost:{PORT}/dashboard  Trends Intelligence Dashboard")
+    print(f"  * http://localhost:{PORT}/admin      Editorial CMS (Open Access)")
+    print(f"  * http://localhost:{PORT}/docs       Interactive API Documentation\n")
+    uvicorn.run("api.index:app", host=HOST, port=PORT, reload=False, log_level="info")
